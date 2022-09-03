@@ -44,7 +44,8 @@ func (r *RedisClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	reqLogger := r.Log.WithValues("Request.Namespace", req.Namespace, "Request.Name", req.Name)
 	reqLogger.Info("Reconciling opstree redis Cluster controller")
 	instance := &redisv1beta1.RedisCluster{}
-
+	// NOTE: retrieves redis deployment instance detail.
+	// QUERY: But why not pass the ctx received in reconcile
 	err := r.Client.Get(context.TODO(), req.NamespacedName, instance)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -52,35 +53,41 @@ func (r *RedisClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{}, err
 	}
-
+	// NOTE: retrieve the expected number of leaders and followers from spec (not from cluster)
 	leaderReplicas := instance.Spec.GetReplicaCounts("leader")
 	followerReplicas := instance.Spec.GetReplicaCounts("follower")
 	totalReplicas := leaderReplicas + followerReplicas
 
+	// NOTE: if the redis cluster is marked to be deleted then execute deletion workflow.
 	if err := k8sutils.HandleRedisClusterFinalizer(instance, r.Client); err != nil {
 		return ctrl.Result{}, err
 	}
 
+	// QUERY: Add redis cluster finalizer but why ? Deletion is detected by deletion timestamp. so it can be done anyways.
 	if err := k8sutils.AddRedisClusterFinalizer(instance, r.Client); err != nil {
 		return ctrl.Result{}, err
 	}
 
+	// NOTE: Create a patch of stateful set definition and applies it.
 	err = k8sutils.CreateRedisLeader(instance)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if leaderReplicas != 0 {
+		// NOTE: Same. creates a patch for service and applies.
 		err = k8sutils.CreateRedisLeaderService(instance)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
+	// NOTE: None of the clusters have PDB. So not applicable
 	err = k8sutils.ReconcileRedisPodDisruptionBudget(instance, "leader", instance.Spec.RedisLeader.PodDisruptionBudget)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
+	// START: Same for follower.
 	err = k8sutils.CreateRedisFollower(instance)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -96,6 +103,7 @@ func (r *RedisClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// END: Same for follower.
 
 	redisLeaderInfo, err := k8sutils.GetStatefulSet(instance.Namespace, instance.ObjectMeta.Name+"-leader")
 	if err != nil {
@@ -131,6 +139,7 @@ func (r *RedisClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	} else {
 		reqLogger.Info("Redis leader count is desired")
+		// PROBLEM: why failed count number has to be so large to execute failover.
 		if k8sutils.CheckRedisClusterState(instance) >= int(totalReplicas)-1 {
 			reqLogger.Info("Redis leader is not desired, executing failover operation")
 			err = k8sutils.ExecuteFailoverOperation(instance)

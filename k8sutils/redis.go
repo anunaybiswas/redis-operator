@@ -133,6 +133,7 @@ func ExecuteRedisReplicationCommand(cr *redisv1beta1.RedisCluster) {
 func checkRedisCluster(cr *redisv1beta1.RedisCluster) [][]string {
 	var client *redis.Client
 	logger := generateRedisManagerLogger(cr.Namespace, cr.ObjectMeta.Name)
+	// PROBLEM: queries only one leader
 	client = configureRedisClient(cr, cr.ObjectMeta.Name+"-leader-0")
 	cmd := redis.NewStringCmd("cluster", "nodes")
 	err := client.Process(cmd)
@@ -184,6 +185,7 @@ func executeFailoverCommand(cr *redisv1beta1.RedisCluster, role string) error {
 		err := client.Process(cmd)
 		if err != nil {
 			logger.Error(err, "Redis command failed with this error")
+			// PROBLEM: Do we need a flush all
 			flushcommand := redis.NewStringCmd("flushall")
 			err := client.Process(flushcommand)
 			if err != nil {
@@ -235,7 +237,8 @@ func CheckRedisNodeCount(cr *redisv1beta1.RedisCluster, nodeType string) int32 {
 	return int32(count)
 }
 
-// CheckRedisClusterState will check the redis cluster state
+// CheckRedisClusterState will return the count of failed or disconnected node
+// PROBLEM: I think this never returned > 0 (at least based on logs)
 func CheckRedisClusterState(cr *redisv1beta1.RedisCluster) int {
 	logger := generateRedisManagerLogger(cr.Namespace, cr.ObjectMeta.Name)
 	clusterNodes := checkRedisCluster(cr)
