@@ -123,12 +123,28 @@ func (r *RedisClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		reqLogger.Info("Redis leader and follower nodes are not ready yet", "Ready.Replicas", strconv.Itoa(int(redisLeaderInfo.Status.ReadyReplicas)), "Expected.Replicas", leaderReplicas)
 		return ctrl.Result{RequeueAfter: time.Second * 120}, nil
 	}
-	reqLogger.Info("Creating redis cluster by executing cluster creation commands", "Leaders.Ready", strconv.Itoa(int(redisLeaderInfo.Status.ReadyReplicas)), "Followers.Ready", strconv.Itoa(int(redisFollowerInfo.Status.ReadyReplicas)))
-	if k8sutils.CheckRedisNodeCount(instance, "") != totalReplicas {
+	redisClusterNodes := k8sutils.CheckRedisNodeCount(instance, "")
+	reqLogger.Info("Creating redis cluster by executing cluster creation commands",
+		"Leaders.Ready", strconv.Itoa(int(redisLeaderInfo.Status.ReadyReplicas)),
+		"Followers.Ready", strconv.Itoa(int(redisFollowerInfo.Status.ReadyReplicas)),
+		"redisClusterNodes", redisClusterNodes)
+
+	if redisClusterNodes != totalReplicas {
 		leaderCount := k8sutils.CheckRedisNodeCount(instance, "leader")
 		if leaderCount != leaderReplicas {
-			reqLogger.Info("Not all leader are part of the cluster...", "Leaders.Count", leaderCount, "Instance.Size", leaderReplicas)
-			k8sutils.ExecuteRedisClusterCommand(instance)
+			reqLogger.Info("Not all leader are part of the cluster...",
+				"Leaders.Count", leaderCount,
+				"Instance.Size", leaderReplicas,
+				"DangerouslyRecreateClusterOnError", instance.Spec.DangerouslyRecreateClusterOnError)
+			err := k8sutils.ExecuteRedisClusterCommand(instance)
+			if err != nil && instance.Spec.DangerouslyRecreateClusterOnError {
+				reqLogger.Info("Adding Leaders failed. Executing fail-over")
+				err = k8sutils.ExecuteFailoverOperation(instance)
+				if err != nil {
+					return ctrl.Result{RequeueAfter: time.Second * 10}, err
+				}
+				return ctrl.Result{RequeueAfter: time.Second * 120}, nil
+			}
 		} else {
 			if followerReplicas > 0 {
 				reqLogger.Info("All leader are part of the cluster, adding follower/replicas", "Leaders.Count", leaderCount, "Instance.Size", leaderReplicas, "Follower.Replicas", followerReplicas)
@@ -139,8 +155,13 @@ func (r *RedisClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	} else {
 		reqLogger.Info("Redis leader count is desired")
+		failedNodesCount := k8sutils.CheckRedisClusterState(instance)
+		executeForceClusterReset := instance.Spec.DangerouslyRecreateClusterOnError && (failedNodesCount > 0)
+		reqLogger.Info("Dangerously Reset Cluster",
+			"DangerouslyRecreateClusterOnError", instance.Spec.DangerouslyRecreateClusterOnError,
+			"failedNodesCount", failedNodesCount)
 		// PROBLEM: why failed count number has to be so large to execute failover.
-		if k8sutils.CheckRedisClusterState(instance) >= int(totalReplicas)-1 {
+		if failedNodesCount >= int(totalReplicas)-1 || executeForceClusterReset {
 			reqLogger.Info("Redis leader is not desired, executing failover operation")
 			err = k8sutils.ExecuteFailoverOperation(instance)
 			if err != nil {
