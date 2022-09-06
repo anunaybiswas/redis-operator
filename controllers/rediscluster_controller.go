@@ -18,10 +18,13 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"k8s.io/apimachinery/pkg/types"
+	"net/http"
+	"os"
+	"redis-operator/k8sutils"
 	"strconv"
 	"time"
-
-	"redis-operator/k8sutils"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -148,7 +151,15 @@ func (r *RedisClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		} else {
 			if followerReplicas > 0 {
 				reqLogger.Info("All leader are part of the cluster, adding follower/replicas", "Leaders.Count", leaderCount, "Instance.Size", leaderReplicas, "Follower.Replicas", followerReplicas)
-				k8sutils.ExecuteRedisReplicationCommand(instance)
+				err := k8sutils.ExecuteRedisReplicationCommand(instance)
+				if err != nil && instance.Spec.DangerouslyRecreateClusterOnError {
+					reqLogger.Info("Adding Leaders failed. Executing fail-over")
+					err = k8sutils.ExecuteFailoverOperation(instance)
+					if err != nil {
+						return ctrl.Result{RequeueAfter: time.Second * 10}, err
+					}
+					return ctrl.Result{RequeueAfter: time.Second * 120}, nil
+				}
 			} else {
 				reqLogger.Info("no follower/replicas configured, skipping replication configuration", "Leaders.Count", leaderCount, "Leader.Size", leaderReplicas, "Follower.Replicas", followerReplicas)
 			}
@@ -179,4 +190,29 @@ func (r *RedisClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&redisv1beta1.RedisCluster{}).
 		Complete(r)
+}
+
+func (r *RedisClusterReconciler) forceRecreateCluster(w http.ResponseWriter, req *http.Request) {
+	q := req.URL.Query()
+	ns := q.Get("ns")
+	name := q.Get("name")
+	instance := &redisv1beta1.RedisCluster{}
+	namespacedName := types.NamespacedName{
+		Name:      name,
+		Namespace: ns,
+	}
+	err := r.Client.Get(context.TODO(), namespacedName, instance)
+	if err != nil {
+		fmt.Fprintf(w, "ERROR")
+	}
+	k8sutils.ExecuteFailoverOperation(instance)
+	fmt.Fprintf(w, "OK")
+}
+
+func (r *RedisClusterReconciler) SetupHttpCommandServer() {
+	http.HandleFunc("/force-recreate", r.forceRecreateCluster)
+	err := http.ListenAndServe(":8090", nil)
+	if err != nil {
+		os.Exit(1)
+	}
 }
